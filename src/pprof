@@ -186,6 +186,7 @@ Options:
    --add_lib=<file>    Read additional symbols and line info from the given library
    --lib_prefix=<dir>  Comma separated list of library path prefixes
    --no_strip_temp     Do not strip template arguments from function names
+   --linear_tendency   Aggregate given profiles as evenly distributed in time to find an overal tandency.
 
 Reporting Granularity:
    --addresses         Report at address level
@@ -440,6 +441,7 @@ sub Init() {
              "no_strip_temp!" => \$main::opt_no_strip_temp,
              "test!"          => \$main::opt_test,
              "debug!"         => \$main::opt_debug,
+             "linear_tendency!" => \$main::linear_tendency,
              # Undocumented flags used only by unittests:
              "test_stride=i"  => \$main::opt_test_stride,
       ) || usage("Invalid option(s)");
@@ -612,8 +614,24 @@ sub Main() {
   my $libs = $data->{libs};   # Info about main program and shared libraries
   $symbol_map = MergeSymbols($symbol_map, $data->{symbols});
 
+  if ($main::linear_tendency) {
+    my $number_of_profiles = @main::profile_files + 1;
+    my $coeff_decrement = 2.0 / @main::profile_files;
+    my $coeff = 1.0 - $coeff_decrement;
+    foreach my $profile_file (@main::profile_files[-$number_of_profiles+1 .. -1]) {
+      if ($main::opt_debug) {
+        print STDERR "Adding profile " . $profile_file . " with coeff " . $coeff . "\n";
+      }
+      my $data_next = ReadProfile($main::prog, $profile_file);
+      $profile = AddProfileWithCoeff($profile, $data_next->{profile}, $coeff);
+      $pcs = AddPcs($pcs, $data_next->{pcs});
+      $symbol_map = MergeSymbols($symbol_map, $data_next->{symbols});
+      $coeff = $coeff - $coeff_decrement;
+    }
+  }
+
   # Add additional profiles, if available.
-  if (scalar(@main::profile_files) > 0) {
+  if (not $main::linear_tendency and scalar(@main::profile_files) > 0) {
     foreach my $pname (@main::profile_files) {
       my $data2 = ReadProfile($main::prog, $pname);
       $profile = AddProfile($profile, $data2->{profile});
@@ -3218,6 +3236,25 @@ sub AddProfile {
   return $R;
 }
 
+# Add A to B with coeff
+sub AddProfileWithCoeff {
+  my $A = shift;
+  my $B = shift;
+  my $coeff = shift;
+
+  my $R = {};
+  foreach my $k (keys(%{$A})) {
+    my $v = 0.0 + $A->{$k} + $coeff * GetEntry($B, $k);
+    AddEntry($R, $k, $v);
+  }
+  foreach my $k (keys(%{$B})) {
+    if (!exists($A->{$k})) {
+      AddEntry($R, $k, 0.0 + $coeff * $B->{$k});
+    }
+  }
+  return $R;
+}
+
 # Merges symbol maps
 sub MergeSymbols {
   my $A = shift;
@@ -3294,7 +3331,7 @@ sub AddEntry {
   my $k = shift;
   my $n = shift;
   if (!exists($profile->{$k})) {
-    $profile->{$k} = 0;
+    $profile->{$k} = 0.0;
   }
   $profile->{$k} += $n;
 }
@@ -4827,10 +4864,12 @@ sub MapToSymbols {
   # If "addr2line" isn't installed on the system at all, just use
   # nm to get what info we can (function names, but not line numbers).
   if (system(ShellEscape($addr2line, "--help") . " >$dev_null 2>&1") != 0) {
+    printf(STDERR "Using nm for symbol map because addr2line not found\n") if ($main::opt_debug);
     MapSymbolsWithNM($image, $offset, $pclist, $symbols);
     return;
   }
 
+  printf(STDERR "Using addr2line for symbol map\n") if ($main::opt_debug);
   # "addr2line -i" can produce a variable number of lines per input
   # address, with no separator that allows us to tell when data for
   # the next address starts.  So we find the address for a special
@@ -5063,6 +5102,7 @@ sub ConfigureObjTools {
     # the opensource release, which is capable of parsing
     # Windows-style PDB executables.  It should live in the path, or
     # in the same directory as pprof.
+    printf STDERR "WINDOWS DETECTED\n";
     $obj_tool_map{"nm_pdb"} = "nm-pdb";
     $obj_tool_map{"addr2line_pdb"} = "addr2line-pdb";
   }
